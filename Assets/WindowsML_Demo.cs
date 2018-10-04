@@ -7,7 +7,7 @@ using System.IO;
 using System;
 using System.Threading.Tasks;
 using Windows.Storage;
-using Windows.AI.MachineLearning.Preview;
+using Windows.AI.MachineLearning;
 using System.Linq;
 using Windows.Graphics.Imaging;
 using Windows.Storage.Streams;
@@ -21,18 +21,17 @@ public class WindowsML_Demo : MonoBehaviour {
     private WebCamTexture webcam;
     private Texture2D Tex2d;
     private byte[] bytes = null;
-    // Use this for initialization
+
     void Start()
     {
         // 学習モデルとラベルデータのローカルフォルダへの移動
-        File.Copy(Application.streamingAssetsPath + "\\" + "SqueezeNet.onnx", Application.persistentDataPath + "\\" + "SqueezeNet.onnx", true);
+        File.Copy(Application.streamingAssetsPath + "\\" + "model.onnx", Application.persistentDataPath + "\\" + "model.onnx", true);
         File.Copy(Application.streamingAssetsPath + "\\" + "Labels.json", Application.persistentDataPath + "\\" + "Labels.json", true);
 
         // Webカメラの取得と録画の開始
         webcam = new WebCamTexture("MN34150", 896, 504,15);
         Tex2d = new Texture2D(896, 504, TextureFormat.RGBA32, false);
         webcam.Play();
-        
 
 #if UNITY_UWP
         // WindowsMLのモデル読み込みの開始
@@ -43,11 +42,6 @@ public class WindowsML_Demo : MonoBehaviour {
         });
 #endif
         StartCoroutine(GetWebCamData());
-    }
-
-    // Update is called once per frame
-    void Update () {
-
     }
 
     private IEnumerator GetWebCamData()
@@ -64,17 +58,16 @@ public class WindowsML_Demo : MonoBehaviour {
 
 #if UNITY_UWP
     private List<string> _labels = new List<string>();
-    private LearningModelPreview _model = null;
-    private ImageVariableDescriptorPreview _inputImageDescription;
-    private TensorVariableDescriptorPreview _outputTensorDescription;
+    private LearningModel _model = null;
     private List<float> _outputVariableList = new List<float>();
-
+    private LearningModelSession _session = null;
+   
     private async Task LoadModelAsync()
     {
         try
         {
             // ラベルデータの読み込み
-            var file = await ApplicationData.Current.LocalFolder.GetFileAsync("Labels.json");
+            var file = await Windows.Storage.ApplicationData.Current.LocalFolder.GetFileAsync("Labels.json");
             using (var inputStream = await file.OpenReadAsync())
             using (var classicStream = inputStream.AsStreamForRead())
             using (var streamReader = new StreamReader(classicStream))
@@ -94,13 +87,10 @@ public class WindowsML_Demo : MonoBehaviour {
             }
 
             // 学習モデルの読み込み
-            var modelFile = await ApplicationData.Current.LocalFolder.GetFileAsync("SqueezeNet.onnx");
-            _model = await LearningModelPreview.LoadModelFromStorageFileAsync(modelFile);
+            var modelFile = await Windows.Storage.ApplicationData.Current.LocalFolder.GetFileAsync("model.onnx");
+            _model = await LearningModel.LoadFromStorageFileAsync(modelFile);
 
-            List<ILearningModelVariableDescriptorPreview> inputFeatures = _model.Description.InputFeatures.ToList();
-            List<ILearningModelVariableDescriptorPreview> outputFeatures = _model.Description.OutputFeatures.ToList();
-            _inputImageDescription = inputFeatures.FirstOrDefault(feature => feature.ModelFeatureKind == LearningModelFeatureKindPreview.Image) as ImageVariableDescriptorPreview;
-            _outputTensorDescription = outputFeatures.FirstOrDefault(feature => feature.ModelFeatureKind == LearningModelFeatureKindPreview.Tensor) as TensorVariableDescriptorPreview;
+            _session = new LearningModelSession(_model, new LearningModelDevice(LearningModelDeviceKind.Default));
         }
         catch (Exception ex)
         {
@@ -143,25 +133,26 @@ public class WindowsML_Demo : MonoBehaviour {
                     VideoFrame inputFrame = VideoFrame.CreateWithSoftwareBitmap(softwareBitmap);
 
                     // WindowsMLに入力，出力形式を設定する
-                    LearningModelBindingPreview binding = new LearningModelBindingPreview(_model as LearningModelPreview);
-                    binding.Bind(_inputImageDescription.Name, inputFrame);
-                    binding.Bind(_outputTensorDescription.Name, _outputVariableList);
+                    LearningModelBinding binding = new LearningModelBinding(_session);
+                    ImageFeatureValue imageTensor = ImageFeatureValue.CreateFromVideoFrame(inputFrame);
+                    binding.Bind("data_0", imageTensor);
 
                     // Process the frame with the model
-                    LearningModelEvaluationResultPreview results = await _model.EvaluateAsync(binding, "test");
-                    List<float> resultProbabilities = results.Outputs[_outputTensorDescription.Name] as List<float>;
+                    var results = await _session.EvaluateAsync(binding, "");
+                    var resultTensor = results.Outputs["softmaxout_1"] as TensorFloat;
+                    var resultVector = resultTensor.GetAsVectorView();
 
                     // 認識結果から適合率の高い上位3位までを選択
                     List<float> topProbabilities = new List<float>() { 0.0f, 0.0f, 0.0f };
                     List<int> topProbabilityLabelIndexes = new List<int>() { 0, 0, 0 };
-                    for (int i = 0; i < resultProbabilities.Count(); i++)
+                    for (int i = 0; i < resultVector.Count(); i++)
                     {
                         for (int j = 0; j < 3; j++)
                         {
-                            if (resultProbabilities[i] > topProbabilities[j])
+                            if (resultVector[i] > topProbabilities[j])
                             {
                                 topProbabilityLabelIndexes[j] = i;
-                                topProbabilities[j] = resultProbabilities[i];
+                                topProbabilities[j] = resultVector[i];
                                 break;
                             }
                         }
